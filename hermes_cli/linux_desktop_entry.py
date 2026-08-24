@@ -25,6 +25,7 @@ Electron main process both use this without loading the full CLI.
 
 from __future__ import annotations
 
+import logging
 import os
 import shutil
 import subprocess
@@ -33,6 +34,8 @@ from pathlib import Path
 from typing import Optional
 
 DESKTOP_ENTRY_NAME = "hermes.desktop"
+
+logger = logging.getLogger(__name__)
 
 
 def is_supported() -> bool:
@@ -70,20 +73,94 @@ def resolve_exec_command() -> str:
     if bin_path:
         resolved = Path(bin_path).resolve()
         if _needs_interpreter(resolved):
-            # The resolved launcher is a Python script whose shebang points at
-            # a NON-venv interpreter (e.g. the repo's `hermes` script with
+            # The resolved launcher is a Python script whose shebang points
+            # at a NON-venv interpreter (e.g. the repo's `hermes` script with
             # `#!/usr/bin/env python3` when argv[0] came from the shell
             # installer's bash wrapper). Launched from the .desktop entry that
-            # shebang resolves to the SYSTEM python and dies on the first
-            # third-party import (#90292) — silently, since Terminal=false.
-            # sys.executable is the interpreter actually running Hermes (the
-            # venv one), so prefix it explicitly.
-            argv = [str(Path(sys.executable).resolve()), str(resolved), "desktop"]
+            # shebang resolves to an interpreter that may NOT have hermes_cli
+            # importable — silently failing under Terminal=false. Prefix it
+            # with an interpreter that can actually run Hermes: prefer
+            # sys.executable only when it can import hermes_cli, otherwise
+            # the installed venv-backed wrapper on PATH, otherwise run as a
+            # module under sys.executable.
+            argv = _interpreter_for(resolved)
         else:
             argv = [str(resolved), "desktop"]
     else:
-        argv = [str(Path(sys.executable).resolve()), "-m", "hermes_cli.main", "desktop"]
+        argv = [str(_running_interpreter()), "-m", "hermes_cli.main", "desktop"]
     return " ".join(_quote_exec_arg(a) for a in argv)
+
+
+def _running_interpreter() -> Path:
+    """The interpreter actually running Hermes, as an absolute path.
+
+    Use ``os.path.abspath`` rather than ``Path(...).resolve()``. On POSIX a
+    venv's ``bin/python`` is a symlink to the base interpreter (the default
+    for both ``python -m venv`` and ``uv venv``). ``.resolve()`` follows that
+    symlink out of the venv to an interpreter whose site-packages lack
+    Hermes' dependencies, so the capability probe in ``_interpreter_for``
+    would wrongly answer "cannot import hermes_cli" and discard the one
+    interpreter that works. ``abspath`` normalises the path without
+    dereferencing the symlink, keeping us inside the venv.
+    """
+    return Path(os.path.abspath(sys.executable))
+
+
+def _interpreter_for(script: Path) -> "list[str]":
+    """Build an argv prefix that runs *script* under a Hermes-capable python.
+
+    Resolution order, first match wins:
+      1. ``sys.executable`` — but only when it can import ``hermes_cli``.
+         Depending on how Hermes was launched (uv shim, system python, a
+         non-venv interpreter), ``sys.executable`` itself may lack
+         hermes_cli, in which case prefixing it would reproduce the same
+         silent failure the .desktop is trying to avoid.
+      2. The installed ``hermes`` wrapper on PATH (e.g. ~/.local/bin/hermes),
+         but ONLY when that wrapper is itself safe to exec — a native binary
+         or a bash launcher that exec's the venv python. A wrapper carrying a
+         ``#!/usr/bin/env python3`` shebang is the same broken script
+         ``resolve_hermes_bin()`` already handed us (when argv[0] is unusable
+         it returns ``shutil.which("hermes")`` verbatim), so reusing it would
+         silently restore the pre-fix ``Exec=``. Such a wrapper is skipped and
+         we fall through to rung 3.
+      3. Fall back to ``sys.executable -m hermes_cli.main``.
+    """
+    if _can_import_hermes_cli(_running_interpreter()):
+        argv = [str(_running_interpreter()), str(script), "desktop"]
+        logger.debug("desktop entry: using sys.executable (hermes_cli importable)")
+        return argv
+    wrapper = shutil.which("hermes")
+    if wrapper and not _needs_interpreter(Path(wrapper).resolve()):
+        # Only trust a wrapper that is genuinely runnable as-is (native
+        # binary or a bash launcher that exec's the venv python). A python
+        # shebang wrapper is the same foreign script we just rejected, so it
+        # would reproduce the silent failure — skip it and let rung 3 answer.
+        argv = [str(Path(wrapper).resolve()), "desktop"]
+        logger.debug("desktop entry: using PATH wrapper %s", wrapper)
+        return argv
+    argv = [str(_running_interpreter()), "-m", "hermes_cli.main", "desktop"]
+    logger.debug("desktop entry: falling back to %s -m hermes_cli.main", _running_interpreter())
+    return argv
+
+
+def _can_import_hermes_cli(interpreter: Path) -> bool:
+    """Whether *interpreter* can import ``hermes_cli`` (the venv gate).
+
+    Bound the probe with a timeout so a hung interpreter (e.g. one that
+    stalls on site initialization) can't stall desktop-entry generation for
+    longer than a few seconds.
+    """
+    try:
+        result = subprocess.run(
+            [str(interpreter), "-c", "import hermes_cli"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            check=False,
+            timeout=10,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return result.returncode == 0
 
 
 def _needs_interpreter(bin_path: Path) -> bool:
@@ -106,7 +183,7 @@ def _needs_interpreter(bin_path: Path) -> bool:
     # A python shebang pointing INSIDE the running interpreter's environment
     # already resolves correctly; anything else (``/usr/bin/env python3``,
     # a system path) would escape the venv when spawned by the DE.
-    exe_dir = str(Path(sys.executable).resolve().parent)
+    exe_dir = str(Path(sys.executable).resolve().parent).lower()
     return exe_dir not in shebang
 
 
@@ -133,7 +210,7 @@ def render_desktop_entry(exec_command: str, icon: str) -> str:
         f"Icon={icon}\n"
         "Terminal=false\n"
         "Categories=Utility;\n"
-        "StartupNotify=true\n"
+        "StartupNotify=false\n"
         "StartupWMClass=Hermes\n"
     )
 
