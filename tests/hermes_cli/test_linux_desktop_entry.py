@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 import stat
 import subprocess
+import venv
 from pathlib import Path
 
 import pytest
@@ -145,7 +146,7 @@ def test_exec_leaves_venv_shebang_scripts_alone(tmp_path, xdg_home, monkeypatch)
     root = _make_project(tmp_path)
     hermes_bin = tmp_path / "bin" / "hermes"
     hermes_bin.parent.mkdir()
-    interpreter = str(Path(sys.executable).resolve())
+    interpreter = os.path.abspath(sys.executable)
     hermes_bin.write_text(f"#!{interpreter}\nimport hermes_cli\n", encoding="utf-8")
     hermes_bin.chmod(0o755)
     monkeypatch.setattr("hermes_cli.relaunch.resolve_hermes_bin", lambda: str(hermes_bin))
@@ -157,6 +158,51 @@ def test_exec_leaves_venv_shebang_scripts_alone(tmp_path, xdg_home, monkeypatch)
     # Console-script with the venv's own interpreter in the shebang: correct
     # as-is, prefixing would only add noise.
     assert exec_line == f"{hermes_bin} desktop"
+
+
+@pytest.mark.skipif(os.name == "nt", reason="requires unprivileged symlink creation")
+def test_needs_interpreter_preserves_venv_python_symlink(tmp_path, monkeypatch):
+    base_python = tmp_path / "uv" / "python3.11"
+    base_python.parent.mkdir()
+    base_python.write_text("", encoding="utf-8")
+    venv_python = tmp_path / "venv" / "bin" / "python"
+    venv_python.parent.mkdir(parents=True)
+    venv_python.symlink_to(base_python)
+
+    hermes_bin = tmp_path / "hermes"
+    hermes_bin.write_text(f"#!{venv_python}\nimport hermes_cli\n", encoding="utf-8")
+    monkeypatch.setattr(lde.sys, "executable", str(venv_python))
+
+    assert lde._needs_interpreter(hermes_bin) is False
+
+
+def test_can_import_rejects_checkout_false_positive(tmp_path, monkeypatch):
+    checkout = tmp_path / "checkout"
+    checkout_package = checkout / "hermes_cli"
+    checkout_package.mkdir(parents=True)
+    (checkout_package / "__init__.py").write_text("", encoding="utf-8")
+    (checkout_package / "main.py").write_text("", encoding="utf-8")
+
+    env_dir = tmp_path / "clean-venv"
+    venv.EnvBuilder(with_pip=False).create(env_dir)
+    interpreter = env_dir / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
+    purelib = subprocess.check_output(
+        [str(interpreter), "-c", "import sysconfig; print(sysconfig.get_path('purelib'))"],
+        text=True,
+    ).strip()
+    installed_package = Path(purelib) / "hermes_cli"
+    installed_package.mkdir()
+    (installed_package / "__init__.py").write_text("", encoding="utf-8")
+    (installed_package / "main.py").write_text(
+        "raise ModuleNotFoundError('missing runtime dependency')\n", encoding="utf-8"
+    )
+    monkeypatch.chdir(checkout)
+    monkeypatch.setenv("PYTHONPATH", str(checkout))
+
+    assert lde._can_import_hermes_cli(interpreter) is False
+
+    (installed_package / "main.py").write_text("", encoding="utf-8")
+    assert lde._can_import_hermes_cli(interpreter) is True
 
 
 def test_install_is_idempotent_and_skips_cache_refresh(tmp_path, xdg_home, monkeypatch):

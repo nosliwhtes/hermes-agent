@@ -144,15 +144,17 @@ def _interpreter_for(script: Path) -> "list[str]":
 
 
 def _can_import_hermes_cli(interpreter: Path) -> bool:
-    """Whether *interpreter* can import ``hermes_cli`` (the venv gate).
+    """Whether *interpreter* can import Hermes' CLI entry module (the venv gate).
 
     Bound the probe with a timeout so a hung interpreter (e.g. one that
     stalls on site initialization) can't stall desktop-entry generation for
-    longer than a few seconds.
+    longer than a few seconds. Isolated mode ignores inherited Python path
+    overrides; the root cwd keeps the implicit import path neutral.
     """
     try:
         result = subprocess.run(
-            [str(interpreter), "-c", "import hermes_cli"],
+            [str(interpreter), "-I", "-c", "import hermes_cli.main"],
+            cwd=os.path.abspath(os.sep),
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
             check=False,
@@ -183,7 +185,7 @@ def _needs_interpreter(bin_path: Path) -> bool:
     # A python shebang pointing INSIDE the running interpreter's environment
     # already resolves correctly; anything else (``/usr/bin/env python3``,
     # a system path) would escape the venv when spawned by the DE.
-    exe_dir = str(Path(sys.executable).resolve().parent).lower()
+    exe_dir = str(_running_interpreter().parent).lower()
     return exe_dir not in shebang
 
 
