@@ -179,16 +179,15 @@ def _needs_interpreter(bin_path: Path) -> bool:
         # Native binary (uv tool shim, PyInstaller, distro package) — its own
         # loader is self-sufficient.
         return False
-    shebang = head.decode("utf-8", errors="replace").strip().lower()
-    if "python" not in shebang:
+    shebang = head.decode("utf-8", errors="replace").strip()
+    if "python" not in shebang.lower():
         # A shell wrapper (e.g. the installer's bash launcher) execs the venv
         # python itself — leave it alone.
         return False
-    # A python shebang pointing INSIDE the running interpreter's environment
-    # already resolves correctly; anything else (``/usr/bin/env python3``,
-    # a system path) would escape the venv when spawned by the DE.
-    exe_dir = str(_running_interpreter().parent).lower()
-    return exe_dir not in shebang
+    # Match path components, not substrings: ``venv/bin-extra/python`` is not
+    # inside ``venv/bin`` even though the former starts with the latter.
+    interpreter = Path(shebang[2:].split(maxsplit=1)[0])
+    return interpreter.parent != _running_interpreter().parent
 
 
 def _quote_exec_arg(arg: str) -> str:

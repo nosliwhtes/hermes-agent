@@ -147,7 +147,7 @@ def test_exec_leaves_venv_shebang_scripts_alone(tmp_path, xdg_home, monkeypatch)
     hermes_bin = tmp_path / "bin" / "hermes"
     hermes_bin.parent.mkdir()
     interpreter = str(os.path.abspath(sys.executable))
-    hermes_bin.write_text(f"#{interpreter}\nimport hermes_cli\n", encoding="utf-8")
+    hermes_bin.write_text(f"#!{interpreter}\nimport hermes_cli\n", encoding="utf-8")
     hermes_bin.chmod(0o755)
     monkeypatch.setattr("hermes_cli.relaunch.resolve_hermes_bin", lambda: str(hermes_bin))
     monkeypatch.setattr(lde, "refresh_desktop_databases", lambda _dir: [])
@@ -170,10 +170,20 @@ def test_needs_interpreter_preserves_venv_python_symlink(tmp_path, monkeypatch):
     venv_python.symlink_to(base_python)
 
     hermes_bin = tmp_path / "hermes"
-    hermes_bin.write_text(f"#{venv_python}\nimport hermes_cli\n", encoding="utf-8")
+    hermes_bin.write_text(f"#!{venv_python}\nimport hermes_cli\n", encoding="utf-8")
     monkeypatch.setattr(lde.sys, "executable", str(venv_python))
 
     assert lde._needs_interpreter(hermes_bin) is False
+
+
+def test_needs_interpreter_rejects_sibling_of_venv_bin(tmp_path, monkeypatch):
+    venv_python = tmp_path / "venv" / "bin" / "python"
+    sibling_python = tmp_path / "venv" / "bin-extra" / "python"
+    hermes_bin = tmp_path / "hermes"
+    hermes_bin.write_text(f"#!{sibling_python}\nimport hermes_cli\n", encoding="utf-8")
+    monkeypatch.setattr(lde, "_running_interpreter", lambda: venv_python)
+
+    assert lde._needs_interpreter(hermes_bin) is True
 
 
 def test_can_import_rejects_checkout_false_positive(tmp_path, monkeypatch):
